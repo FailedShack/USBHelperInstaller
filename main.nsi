@@ -1,10 +1,10 @@
 !include "MUI2.nsh"
 !include "nsDialogs.nsh"
-!include "ZipDLL.nsh"
 !include "LogicLib.nsh"
 !include "XML.nsh"
 !include "nsArray.nsh"
 !include "WinMessages.nsh"
+!include "FileFunc.nsh"
 
 !define MUI_ICON "Icon.ico"
 !define MUI_WELCOMEFINISHPAGE_BITMAP "bg.bmp"
@@ -28,6 +28,7 @@ Page custom VersionSelect
 !insertmacro MUI_LANGUAGE "English"
 
 !define ARCHIVE_URL https://archive.org/download/WiiUUSBHelper/
+!define UNINST_LOG Uninstall.log
 
 RequestExecutionLevel user
 Name "USBHelperLauncher"
@@ -48,18 +49,20 @@ Var ChangeLog
 
 Section Launcher launcher
 
-	inetc::get $DownloadUrl $TempFile
+	inetc::get $DownloadUrl $TempFile /end
 	Call EnsureSuccess
-	!insertmacro ZIPDLL_EXTRACT $TempFile $INSTDIR "<ALL>"
+	Push $TempFile
+	Call Unzip
 	Delete $TempFile
 
 SectionEnd
 
 Section Helper helper
 
-	inetc::get "${ARCHIVE_URL}$HelperVersion.zip" $TempFile
+	inetc::get "${ARCHIVE_URL}$HelperVersion.zip" $TempFile /end
 	Call EnsureSuccess
-	!insertmacro ZIPDLL_EXTRACT $TempFile $INSTDIR "<ALL>"
+	Push $TempFile
+	Call Unzip
 	Delete $TempFile
 
 SectionEnd
@@ -102,9 +105,38 @@ SectionEnd
 
 Section Uninstall
 
+	${IfNot} ${FileExists} "$INSTDIR\${UNINST_LOG}"
+		MessageBox MB_OK|MB_ICONSTOP "Missing ${UNINST_LOG}. Cannot uninstall."
+		Quit
+	${EndIf}
+	
+	FileOpen $0 "$INSTDIR\${UNINST_LOG}" r
+	${Do}
+		ClearErrors
+		FileRead $0 $1
+		${If} ${Errors}
+			${Break}
+		${EndIf}
+		StrCpy $1 "$INSTDIR\$1" -2
+		Delete $1
+		/* Attempt to remove directories */
+		${DoUntil} ${Errors}
+			${GetParent} $1 $1
+			RMDir $1
+		${LoopUntil} $1 == $INSTDIR
+	${Loop}
+	FileClose $0
+	
+	Delete "$INSTDIR\Patched.exe"
+	Delete "$INSTDIR\conf.json"
+	Delete "$INSTDIR\Icon.ico"
+	Delete "$INSTDIR\Changelog.txt"
+	Delete "$INSTDIR\Uninstall.exe"
+	Delete "$INSTDIR\${UNINST_LOG}"
+	RMDir $INSTDIR
+	
 	Delete "$DESKTOP\Wii U USB Helper.lnk"
 	Delete "$SMPROGRAMS\Wii U USB Helper.lnk"
-	RMDir /r "$INSTDIR"
 	RMDir /r "$LocalAppData\Hikari06"
 	RMDir /r "$AppData\USB_HELPER"
 	DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\USBHelperLauncher"
@@ -125,7 +157,7 @@ Function VersionSelect
 	
 	/* Load Wii U USB Helper releases */
 	GetTempFileName $TempFile
-	inetc::get /silent "${ARCHIVE_URL}WiiUUSBHelper_files.xml" $TempFile
+	inetc::get /silent "${ARCHIVE_URL}WiiUUSBHelper_files.xml" $TempFile /end
 	Call EnsureSuccess
 	${xml::LoadFile} "$TempFile" $0
 	${xml::GotoPath} "/files" $0
@@ -191,6 +223,23 @@ Function EnsureSuccess
 
 FunctionEnd
 
+Function Unzip
+
+	Pop $0
+	CreateDirectory $INSTDIR
+	FileOpen $1 "$INSTDIR\${UNINST_LOG}" a
+	FileSeek $1 0 END
+	nsisunz::UnzipToStack $0 $INSTDIR
+	Pop $0
+	${DoUntil} ${Errors}
+		Pop $0
+		FileWrite $1 "$0$\r$\n"
+		DetailPrint "Extract: $0"
+	${Loop}
+	FileClose $1
+
+FunctionEnd
+
 Function OnDropDownChanged
 
 	Pop $DropDown
@@ -202,14 +251,13 @@ Function OnDropDownChanged
 
 FunctionEnd
 
-
 Function RetrieveInfo
 
 	/* Disable input */
 	Push 0
 	Call ChangeButtonState
 	
-	inetc::get /silent "https://api.github.com/repos/FailedShack/USBHelperLauncher/releases/latest" $TempFile
+	inetc::get /silent "https://api.github.com/repos/FailedShack/USBHelperLauncher/releases/latest" $TempFile /end
 	Call EnsureSuccess
 	nsJSON::Set /file $TempFile
 	nsJSON::Get "tag_name" /end
