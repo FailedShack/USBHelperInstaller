@@ -6,6 +6,8 @@
 !include "WinMessages.nsh"
 !include "FileFunc.nsh"
 
+SetCompressor /SOLID lzma
+
 !define MUI_ICON "Icon.ico"
 !define MUI_WELCOMEFINISHPAGE_BITMAP "bg.bmp"
 !insertmacro MUI_PAGE_WELCOME
@@ -27,9 +29,20 @@ Page custom VersionSelect
 
 !insertmacro MUI_LANGUAGE "English"
 
+!define VERSION 0.0.1.2
 !define ARCHIVE_URL https://archive.org/download/WiiUUSBHelper/
+!define ARCHIVE_MIRROR https://dl.nul.sh/WiiUUSBHelper/
+!define GITHUB_URL https://api.github.com/repos/FailedShack/USBHelperLauncher/releases/latest
+!define GITHUB_MIRROR https://dl.nul.sh/USBHelperLauncher/latest
+!define METRICS_URL https://api.nul.sh/metrics
 !define UNINST_LOG Uninstall.log
 
+VIProductVersion ${VERSION}
+VIAddVersionKey "ProductName" "USBHelperInstaller"
+VIAddVersionKey "ProductVersion" ${VERSION}
+VIAddVersionKey "LegalCopyright" "Copyright (C) 2019 FailedShack"
+VIAddVersionKey "FileDescription" "USBHelperInstaller"
+VIAddVersionKey "FileVersion" ${VERSION}
 RequestExecutionLevel user
 Name "USBHelperLauncher"
 OutFile "USBHelperInstaller.exe"
@@ -37,6 +50,7 @@ OutFile "USBHelperInstaller.exe"
 Var Dialog
 Var DropDown
 Var TempFile
+Var Guid
 
 /* Helper Release */
 Var HelperVersion
@@ -49,8 +63,9 @@ Var ChangeLog
 
 Section Launcher launcher
 
-	inetc::get $DownloadUrl $TempFile /end
-	Call EnsureSuccess
+	Push $DownloadUrl
+	Push 0
+	Call DownloadTemp
 	Push $TempFile
 	Call Unzip
 	Delete $TempFile
@@ -59,8 +74,10 @@ SectionEnd
 
 Section Helper helper
 
-	inetc::get "${ARCHIVE_URL}$HelperVersion.zip" $TempFile /end
-	Call EnsureSuccess
+	Push "${ARCHIVE_MIRROR}$HelperVersion.zip"
+	Push "${ARCHIVE_URL}$HelperVersion.zip"
+	Push 0
+	Call DownloadTemp
 	Push $TempFile
 	Call Unzip
 	Delete $TempFile
@@ -79,6 +96,11 @@ Section Finish
 	
 	CreateShortCut "$DESKTOP\Wii U USB Helper.lnk" "$INSTDIR\USBHelperLauncher.exe"
 	CreateShortCut "$SMPROGRAMS\Wii U USB Helper.lnk" "$INSTDIR\USBHelperLauncher.exe"
+	
+	Call SendMetrics
+	FileOpen $0 "$INSTDIR\guid" w
+	FileWrite $0 $Guid
+	FileClose $0
 	
 	${If} ${FileExists} "$LocalAppData\Hikari06"
 	${OrIf} ${FileExists} "$AppData\USB_HELPER"
@@ -110,6 +132,10 @@ Section Uninstall
 		Quit
 	${EndIf}
 	
+	FileOpen $0 "$INSTDIR\guid" r
+	FileRead $0 $2
+	FileClose $0
+	
 	FileOpen $0 "$INSTDIR\${UNINST_LOG}" r
 	${Do}
 		ClearErrors
@@ -127,6 +153,7 @@ Section Uninstall
 	${Loop}
 	FileClose $0
 	
+	Delete "$INSTDIR\guid"
 	Delete "$INSTDIR\Patched.exe"
 	Delete "$INSTDIR\conf.json"
 	Delete "$INSTDIR\Icon.ico"
@@ -140,6 +167,11 @@ Section Uninstall
 	RMDir /r "$LocalAppData\Hikari06"
 	RMDir /r "$AppData\USB_HELPER"
 	DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\USBHelperLauncher"
+	
+	nsJSON::Set /tree metrics /value `{ "Url": "${METRICS_URL}", "Verb": "POST", "DataType": "JSON" }`
+	nsJSON::Set /tree metrics "Data" "guid" /value `"$2"` /end
+	nsJSON::Set /tree metrics "Data" "event" /value `"uninstall"` /end
+	nsJSON::Set /http metrics
 
 SectionEnd
 
@@ -157,8 +189,10 @@ Function VersionSelect
 	
 	/* Load Wii U USB Helper releases */
 	GetTempFileName $TempFile
-	inetc::get /silent "${ARCHIVE_URL}WiiUUSBHelper_files.xml" $TempFile /end
-	Call EnsureSuccess
+	Push "${ARCHIVE_MIRROR}WiiUUSBHelper_files.xml"
+	Push "${ARCHIVE_URL}WiiUUSBHelper_files.xml"
+	Push 1
+	Call DownloadTemp
 	${xml::LoadFile} "$TempFile" $0
 	${xml::GotoPath} "/files" $0
 	${xml::FirstChild} "file" $1 $0
@@ -172,12 +206,24 @@ Function VersionSelect
 			StrCpy $2 $2 -4 # Remove extension
 			IntOp $3 $3 / 1000 # Bytes to KB
 			nsArray::Set releases /key=$2 $3
-			${NSD_CB_AddString} $DropDown $2
 		${EndIf}
 		${xml::Parent} $1 $0
 		${xml::NextSibling} "file" $1 $0
 	${EndWhile}
 	${xml::Unload}
+	
+	/* Sort descending by key */
+	nsArray::Sort releases 9
+	nsArray::Length releases
+	Pop $0
+	StrCpy $1 0
+	${DoWhile} $1 < $0
+		nsArray::Get releases /at=$1
+		Pop $2
+		Pop $3 # Don't care about value
+		${NSD_CB_AddString} $DropDown $2
+		IntOp $1 $1 + 1
+	${Loop}
 	
 	/* Select 0.6.1.653 by default */
 	StrCpy $HelperVersion "Wii U USB Helper 0.6.1.653"
@@ -211,13 +257,28 @@ Function ChangeButtonState
 
 FunctionEnd
 
-Function EnsureSuccess
+Function DownloadTemp
 
 	Pop $0
-	${If} $0 S!= "OK"
+	StrCpy $1 0
+	${DoUntil} ${Errors}
+		Pop $2
+		${If} $1 = 0
+			${If} $0 = 1
+				inetc::get /silent $2 $TempFile /end
+			${Else}
+				inetc::get $2 $TempFile /end
+			${EndIf}
+			Pop $3
+			${If} $3 S== "OK"
+				StrCpy $1 1
+			${EndIf}
+		${EndIf}
+	${Loop}
+	${If} $1 = 0
 		MessageBox MB_OK|MB_ICONSTOP "Could not establish a connection.$\r$\n\
 		Please check your internet connection and try again.$\r$\n\
-		Reason: $0"
+		Reason: $3"
 		Quit
 	${EndIf}
 
@@ -245,7 +306,7 @@ Function OnDropDownChanged
 	Pop $DropDown
 	SendMessage $DropDown ${CB_GETCURSEL} 0 0 $0
 	nsArray::Get releases /at=$0
-	Pop $1 # Don't care about key
+	Pop $HelperVersion
 	Pop $1
 	SectionSetSize ${helper} $1
 
@@ -257,8 +318,10 @@ Function RetrieveInfo
 	Push 0
 	Call ChangeButtonState
 	
-	inetc::get /silent "https://api.github.com/repos/FailedShack/USBHelperLauncher/releases/latest" $TempFile /end
-	Call EnsureSuccess
+	Push ${GITHUB_MIRROR}
+	Push ${GITHUB_URL}
+	Push 1
+	Call DownloadTemp
 	nsJSON::Set /file $TempFile
 	nsJSON::Get "tag_name" /end
 	Pop $Version
@@ -275,6 +338,34 @@ Function RetrieveInfo
 	/* Enable input */
 	Push 1
 	Call ChangeButtonState
+
+FunctionEnd
+
+Function SendMetrics
+
+	System::Call 'kernel32::GetSystemDefaultLangID() i .r0'
+	System::Call 'kernel32::GetLocaleInfoA(i 1024, i 0x59, t .r1, i ${NSIS_MAX_STRLEN}) i r0'
+	System::Call 'kernel32::GetLocaleInfoA(i 1024, i 0x5A, t .r2, i ${NSIS_MAX_STRLEN}) i r0'
+	StrCpy $0 "$1-$2"
+	
+	System::Call `ole32::CoCreateGuid(g .r1)`
+	StrCpy $Guid $1 -1 1
+	
+	ReadRegStr $2 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion" ProductName
+	${If} $2 == ""
+		ReadRegStr $2 HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion" ProductName
+	${EndIf}
+	
+	nsJSON::Set /tree metrics /value `{ "Url": "${METRICS_URL}", "Verb": "POST", "DataType": "JSON" }`
+	nsJSON::Set /tree metrics "Data" "guid" /value `"$Guid"` /end
+	nsJSON::Set /tree metrics "Data" "event" /value `"install"` /end
+	nsJSON::Set /tree metrics "Data" "context" /value `"USBHelperInstaller"` /end
+	nsJSON::Set /tree metrics "Data" "version" /value `"${VERSION}"` /end
+	nsJSON::Set /tree metrics "Data" "os" /value `"$2"` /end
+	nsJSON::Set /tree metrics "Data" "locale" /value `"$0"` /end
+	nsJSON::Set /tree metrics "Data" "products" "USBHelperLauncher" /value `"$Version"` /end
+	nsJSON::Set /tree metrics "Data" "products" "Wii U USB Helper" /value `"$HelperVersion"` /end
+	nsJSON::Set /http metrics
 
 FunctionEnd
 
